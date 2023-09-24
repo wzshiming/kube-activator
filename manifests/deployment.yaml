@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: activator
+spec:
+  replicas: 1
+  template:
+    spec:
+      containers:
+      - name: activator
+        image: activator:latest
+        imagePullPolicy: IfNotPresent
+        args:
+        - --ip
+        - $(POD_IP)
+        env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+      serviceAccountName: activator
+      restartPolicy: Always
