@@ -72,7 +72,12 @@ func (s *Server) watchService(ctx context.Context) error {
 		},
 		&corev1.Service{},
 		0,
-		cache.ResourceEventHandlerFuncs{},
+		cache.ResourceEventHandlerFuncs{
+			AddFunc: func(obj interface{}) {
+				svc := obj.(*corev1.Service)
+				s.restoreSelector(ctx, svc)
+			},
+		},
 		cache.Indexers{},
 	)
 
@@ -194,6 +199,36 @@ func (s *Server) needInject(svc *corev1.Service) ([]corev1.ServicePort, bool) {
 		p = append(p, port)
 	}
 	return p, true
+}
+
+// restore the service selector
+func (s *Server) restoreSelector(ctx context.Context, svc *corev1.Service) {
+	selectorStr := svc.Annotations[cacheTargetSelectorKey]
+	if selectorStr == "" {
+		return
+	}
+
+	key := cache.ObjectName{Namespace: svc.Namespace, Name: svc.Name}.String()
+	sel := map[string]string{}
+	err := json.Unmarshal([]byte(selectorStr), &sel)
+	if err != nil {
+		klog.ErrorS(err, "scaleTargetRefSelector unmarshal failed", "ep", key)
+		return
+	}
+	if len(sel) == 0 {
+		klog.ErrorS(nil, "scaleTargetRefSelector not found", "ep", key)
+		return
+	}
+
+	svc = svc.DeepCopy()
+
+	delete(svc.Annotations, cacheTargetSelectorKey)
+	svc.Spec.Selector = sel
+	_, err = s.clientset.CoreV1().Services(svc.Namespace).Update(ctx, svc, metav1.UpdateOptions{})
+	if err != nil {
+		klog.ErrorS(err, "scaleTargetRefSelector update failed", "ep", key)
+		return
+	}
 }
 
 // injectEndpoint injects the ip and port to the endpoints
@@ -377,22 +412,8 @@ func (s *Server) scaleUp(ds *PortInformation) {
 
 	// TODO: remove this
 	klog.InfoS("restore service selector")
-	sel := map[string]string{}
-	err = json.Unmarshal([]byte(selectorStr), &sel)
-	if err != nil {
-		klog.ErrorS(err, "scaleTargetRefSelector unmarshal failed", "ep", key)
-		return
-	}
-	if len(sel) == 0 {
-		klog.ErrorS(nil, "scaleTargetRefSelector not found", "ep", key)
-		return
-	}
-	svc.Spec.Selector = sel
-	_, err = s.clientset.CoreV1().Services(svc.Namespace).Update(context.Background(), svc, metav1.UpdateOptions{})
-	if err != nil {
-		klog.ErrorS(err, "scaleTargetRefSelector update failed", "ep", key)
-		return
-	}
+	s.restoreSelector(context.Background(), svc)
+
 }
 
 func (s *Server) deploymentIsReady(dep *appsv1.Deployment) bool {
