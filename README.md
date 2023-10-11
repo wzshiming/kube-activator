@@ -1,6 +1,6 @@
 # kube-activator
 
-This is demo of activator only for scala to 1 from 0
+This is demo of activator only for scale to 1 from 0
 
 ## Usage
 
