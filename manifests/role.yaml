@@ -8,24 +8,25 @@ rules:
   - ""
   resources:
   - services
-  - endpoints
   verbs:
   - get
   - list
   - watch
-  - update
-  - patch
 - apiGroups:
-  - apps
+  - discovery.k8s.io
   resources:
-  - deployments
+  - endpointslices
   verbs:
   - get
   - list
   - watch
+  - create
+  - update
+  - delete
 - apiGroups:
   - apps
   resources:
   - deployments/scale
   verbs:
+  - get
   - update

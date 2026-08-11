@@ -1,0 +1,74 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: webserver-conf
+data:
+  default.conf: |
+    server {
+      listen 80;
+      location / {
+        root /usr/share/nginx/html;
+        index index.html;
+      }
+      location = /stub_status {
+        stub_status;
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webserver
+  labels:
+    app: webserver
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: webserver
+  template:
+    metadata:
+      labels:
+        app: webserver
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9113"
+    spec:
+      containers:
+      - name: nginx
+        image: docker.io/library/nginx:latest
+        imagePullPolicy: IfNotPresent
+        readinessProbe:
+          # an HTTP probe would inflate nginx_http_requests_total
+          tcpSocket:
+            port: 80
+          periodSeconds: 1
+        volumeMounts:
+        - name: conf
+          mountPath: /etc/nginx/conf.d
+      - name: exporter
+        image: docker.io/nginx/nginx-prometheus-exporter:latest
+        imagePullPolicy: IfNotPresent
+        args:
+        - --nginx.scrape-uri=http://127.0.0.1/stub_status
+        ports:
+        - name: metrics
+          containerPort: 9113
+      volumes:
+      - name: conf
+        configMap:
+          name: webserver-conf
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: webserver
+  annotations:
+    scale-from-zero.zsm.io/deployment: webserver
+spec:
+  selector:
+    app: webserver
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 80
