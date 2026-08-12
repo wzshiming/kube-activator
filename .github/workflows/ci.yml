@@ -51,18 +51,16 @@ jobs:
       - name: Scale webserver to 0
         run: |
           kubectl scale deployment webserver --replicas=0
-          activator_ip="$(kubectl get pod -n kube-system -l app=activator -o jsonpath='{.items[0].status.podIP}')"
           for i in $(seq 1 30); do
-            ip="$(kubectl get endpoints webserver -o jsonpath='{.subsets[0].addresses[0].ip}' 2>/dev/null)"
-            if [ -n "$ip" ] && [ "$ip" = "$activator_ip" ]; then
+            if kubectl get endpointslice webserver-activator >/dev/null 2>&1; then
               # give kube-proxy a moment to program the injected endpoint
               sleep 5
               exit 0
             fi
             sleep 2
           done
-          echo "activator endpoint was not injected"
-          kubectl get endpoints webserver -o yaml
+          echo "activator endpointslice was not created"
+          kubectl get endpointslices -o yaml
           exit 1
 
       - name: Test activator wakes webserver
@@ -75,5 +73,5 @@ jobs:
         if: failure()
         run: |
           kubectl get pods -A -o wide || true
-          kubectl get svc,endpoints -A || true
+          kubectl get svc,endpointslices -A || true
           kubectl logs -n kube-system deploy/activator --tail=200 || true

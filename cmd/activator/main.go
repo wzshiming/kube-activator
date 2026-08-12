@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"github.com/spf13/pflag"
 	"github.com/wzshiming/kube-activator/pkg/server"
@@ -37,6 +38,7 @@ func main() {
 	err := run(ctx, &f)
 	if err != nil {
 		klog.ErrorS(err, "run")
+		os.Exit(1)
 	}
 	select {}
 }
