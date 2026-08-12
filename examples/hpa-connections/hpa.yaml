@@ -1,0 +1,43 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: webserver
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: webserver
+  # requires the HPAScaleToZero feature gate
+  minReplicas: 0
+  maxReplicas: 10
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 60
+  metrics:
+  # presence: requests within the last minute keep at least one replica, a
+  # quiet minute means zero; the selector is the only workload-specific binding
+  - type: External
+    external:
+      metric:
+        name: nginx_has_recent_requests
+        selector:
+          matchLabels:
+            app: webserver
+      target:
+        type: AverageValue
+        averageValue: "1"
+  # CPU drives 1 <-> N. It cannot be a plain Resource metric from
+  # metrics-server: desired replicas is the max over all metrics and an idle
+  # pod's CPU proposal never reaches 0, which would block scale-to-zero. So
+  # the same kubelet CPU data arrives as an external metric gated by the
+  # request presence instead
+  - type: External
+    external:
+      metric:
+        name: nginx_gated_cpu
+        selector:
+          matchLabels:
+            app: webserver
+      target:
+        type: AverageValue
+        averageValue: "500m"

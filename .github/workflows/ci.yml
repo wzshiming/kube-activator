@@ -7,9 +7,10 @@ on:
   pull_request:
 
 jobs:
-  manual-scale-to-zero:
+  manual:
     name: Manual scale to zero
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
 
@@ -31,9 +32,9 @@ jobs:
 
       - name: Deploy webserver
         run: |
-          docker pull docker.io/library/nginx:latest
-          kind load docker-image docker.io/library/nginx:latest
-          kubectl create deployment webserver --image=docker.io/library/nginx:latest
+          docker pull docker.io/library/nginx:1.30.4
+          kind load docker-image docker.io/library/nginx:1.30.4
+          kubectl create deployment webserver --image=docker.io/library/nginx:1.30.4
           kubectl create service clusterip webserver --tcp=8080:80
           kubectl rollout status deploy/webserver --timeout=120s
 
@@ -75,3 +76,162 @@ jobs:
           kubectl get pods -A -o wide || true
           kubectl get svc,endpointslices -A || true
           kubectl logs -n kube-system deploy/activator --tail=200 || true
+
+  hpa:
+    name: HPA scale to zero
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build image
+        run: docker build -t activator:latest .
+
+      - name: Write kind config
+        run: |
+          cat > /tmp/kind-config.yaml <<'EOF'
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          featureGates:
+            HPAScaleToZero: true
+          EOF
+
+      - name: Create cluster (HPAScaleToZero enabled)
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: kind
+          config: /tmp/kind-config.yaml
+
+      - name: Load image
+        run: kind load docker-image activator:latest
+
+      - name: Deploy Prometheus and prometheus-adapter
+        run: |
+          docker pull docker.io/prom/prometheus:v3.13.2
+          docker pull registry.k8s.io/prometheus-adapter/prometheus-adapter:v0.12.0
+          kind load docker-image docker.io/prom/prometheus:v3.13.2 registry.k8s.io/prometheus-adapter/prometheus-adapter:v0.12.0
+          kubectl apply -f examples/hpa-connections/prometheus.yaml
+          helm install prometheus-adapter oci://ghcr.io/prometheus-community/charts/prometheus-adapter \
+            --version 5.3.0 \
+            -f examples/hpa-connections/adapter-values.yaml
+          kubectl rollout status deploy/prometheus --timeout=180s
+          kubectl rollout status deploy/prometheus-adapter --timeout=180s
+          kubectl wait --for=condition=Available apiservice/v1beta1.external.metrics.k8s.io --timeout=180s
+
+      - name: Deploy activator
+        run: |
+          kubectl apply -k ./manifests
+          kubectl rollout status -n kube-system deploy/activator --timeout=120s
+
+      - name: Deploy webserver
+        run: |
+          docker pull docker.io/library/nginx:1.30.4
+          docker pull docker.io/nginx/nginx-prometheus-exporter:1.5.1
+          kind load docker-image docker.io/library/nginx:1.30.4 docker.io/nginx/nginx-prometheus-exporter:1.5.1
+          kubectl apply -f examples/hpa-connections/webserver.yaml
+          kubectl rollout status deploy/webserver --timeout=120s
+
+      - name: Wait for the requests metric to be served
+        run: |
+          for i in $(seq 1 30); do
+            kubectl get --raw "/apis/external.metrics.k8s.io/v1beta1/namespaces/default/nginx_has_recent_requests" && exit 0
+            sleep 5
+          done
+          echo "metric never became readable"
+          kubectl logs deploy/prometheus-adapter --tail=30
+          exit 1
+
+      - name: Create HPA with minReplicas 0
+        run: kubectl apply -f examples/hpa-connections/hpa.yaml
+
+      - name: Wait for the HPA to scale the webserver to 0 (no connections)
+        run: |
+          replicas=""
+          for i in $(seq 1 60); do
+            replicas="$(kubectl get deploy webserver -o jsonpath='{.spec.replicas}')"
+            [ "$replicas" = "0" ] && break
+            sleep 5
+          done
+          if [ "$replicas" != "0" ]; then
+            echo "HPA did not scale to zero, replicas=$replicas"
+            kubectl describe hpa webserver
+            exit 1
+          fi
+          for i in $(seq 1 30); do
+            if kubectl get endpointslice webserver-activator >/dev/null 2>&1; then
+              # give kube-proxy a moment to program the injected endpoint
+              sleep 5
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "activator endpointslice was not created"
+          kubectl get endpointslices -o yaml
+          exit 1
+
+      - name: Wake the webserver with a steady stream of requests
+        run: |
+          # short requests through the service: the first one wakes the
+          # workload, the stream keeps the requests metric above zero until
+          # the scale-back step kills it (the in-container timeout is only a
+          # backstop, generously sized so the stream outlives this step's
+          # worst-case waits plus the 60s of the next step)
+          kubectl exec -n kube-system deploy/activator -- timeout 600 sh -c \
+            'while true; do wget -q -O /dev/null -T 30 http://webserver.default.svc:8080/; sleep 2; done' &
+          replicas=""
+          for i in $(seq 1 18); do
+            replicas="$(kubectl get deploy webserver -o jsonpath='{.spec.replicas}')"
+            [ -n "$replicas" ] && [ "$replicas" != "0" ] && break
+            sleep 5
+          done
+          if [ -z "$replicas" ] || [ "$replicas" = "0" ]; then
+            echo "activator did not wake the webserver"
+            exit 1
+          fi
+          kubectl rollout status deploy/webserver --timeout=90s
+          kubectl exec -n kube-system deploy/activator -- wget -O- -T 30 webserver.default.svc:8080
+
+      - name: Verify the HPA keeps the webserver up while requests keep coming
+        run: |
+          sleep 60
+          replicas="$(kubectl get deploy webserver -o jsonpath='{.spec.replicas}')"
+          if [ -z "$replicas" ] || [ "$replicas" -lt 1 ]; then
+            echo "expected >=1 replicas, got $replicas"
+            kubectl describe hpa webserver
+            exit 1
+          fi
+
+      - name: Verify the HPA scales back to 0 after the requests stop
+        run: |
+          # stop the request stream deterministically: the pattern matches the
+          # sh loop (and any in-flight wget) by the URL in their cmdline
+          kubectl exec -n kube-system deploy/activator -- pkill -f webserver.default.svc || true
+          replicas=""
+          for i in $(seq 1 60); do
+            replicas="$(kubectl get deploy webserver -o jsonpath='{.spec.replicas}')"
+            [ "$replicas" = "0" ] && break
+            sleep 5
+          done
+          if [ "$replicas" != "0" ]; then
+            echo "HPA did not scale back to zero, replicas=$replicas"
+            kubectl describe hpa webserver
+            kubectl logs deploy/prometheus-adapter --tail=20
+            exit 1
+          fi
+          for i in $(seq 1 30); do
+            kubectl get endpointslice webserver-activator >/dev/null 2>&1 && exit 0
+            sleep 2
+          done
+          echo "activator endpointslice was not re-created"
+          kubectl get endpointslices -o yaml
+          exit 1
+
+      - name: Dump state on failure
+        if: failure()
+        run: |
+          kubectl get pods -A -o wide || true
+          kubectl get svc,endpointslices,hpa -A || true
+          kubectl describe hpa webserver || true
+          kubectl logs -n kube-system deploy/activator --tail=200 || true
+          kubectl logs deploy/prometheus-adapter --tail=50 || true
+          kubectl logs deploy/prometheus --tail=30 || true
