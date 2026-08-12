@@ -92,7 +92,7 @@ func (s *Server) newServiceInformer(ctx context.Context) cache.Controller {
 		0,
 		cache.ResourceEventHandlerFuncs{
 			AddFunc:    s.enqueueService,
-			UpdateFunc: func(_, newObj interface{}) { s.enqueueService(newObj) },
+			UpdateFunc: func(_, newObj any) { s.enqueueService(newObj) },
 			DeleteFunc: s.enqueueService,
 		},
 		cache.Indexers{},
@@ -102,7 +102,7 @@ func (s *Server) newServiceInformer(ctx context.Context) cache.Controller {
 	return controller
 }
 
-func (s *Server) enqueueService(obj interface{}) {
+func (s *Server) enqueueService(obj any) {
 	if tombstone, ok := obj.(cache.DeletedFinalStateUnknown); ok {
 		obj = tombstone.Obj
 	}
@@ -112,7 +112,7 @@ func (s *Server) enqueueService(obj interface{}) {
 }
 
 func (s *Server) newEndpointSliceInformer(ctx context.Context) cache.Controller {
-	handle := func(obj interface{}) {
+	handle := func(obj any) {
 		if tombstone, ok := obj.(cache.DeletedFinalStateUnknown); ok {
 			obj = tombstone.Obj
 		}
@@ -140,11 +140,11 @@ func (s *Server) newEndpointSliceInformer(ctx context.Context) cache.Controller 
 		0,
 		cache.ResourceEventHandlerFuncs{
 			AddFunc:    handle,
-			UpdateFunc: func(_, newObj interface{}) { handle(newObj) },
+			UpdateFunc: func(_, newObj any) { handle(newObj) },
 			DeleteFunc: handle,
 		},
 		cache.Indexers{
-			serviceIndex: func(obj interface{}) ([]string, error) {
+			serviceIndex: func(obj any) ([]string, error) {
 				es, ok := obj.(*discoveryv1.EndpointSlice)
 				if !ok {
 					return nil, nil
@@ -276,8 +276,8 @@ func (s *Server) inject(ctx context.Context, svc *corev1.Service, ports []corev1
 			return fmt.Errorf("add target for port %d: %w", port.Port, err)
 		}
 		slicePorts = append(slicePorts, discoveryv1.EndpointPort{
-			Name:     ptr.To(port.Name),
-			Port:     ptr.To(int32(pi.Listener.Port())),
+			Name:     new(port.Name),
+			Port:     new(int32(pi.Listener.Port())),
 			Protocol: ptr.To(corev1.ProtocolTCP),
 		})
 	}
@@ -297,7 +297,7 @@ func (s *Server) inject(ctx context.Context, svc *corev1.Service, ports []corev1
 		AddressType: addressType(s.ip),
 		Endpoints: []discoveryv1.Endpoint{{
 			Addresses:  []string{s.ip},
-			Conditions: discoveryv1.EndpointConditions{Ready: ptr.To(true)},
+			Conditions: discoveryv1.EndpointConditions{Ready: new(true)},
 		}},
 		Ports: slicePorts,
 	}

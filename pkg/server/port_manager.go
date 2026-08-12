@@ -146,9 +146,7 @@ func (pm *PortManager) retryCallback(downstream *PortInformation) {
 		}
 		klog.ErrorS(err, "scale up failed, will retry", "ep", key, "port", downstream.Target.Port, "delay", delay)
 		time.Sleep(delay)
-		if delay < 15*time.Second {
-			delay *= 2
-		}
+		delay = min(delay*2, 15*time.Second)
 		if !pm.registered(downstream) {
 			return
 		}
