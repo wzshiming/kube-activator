@@ -3,6 +3,7 @@ package server
 import (
 	"net"
 	"sync"
+	"time"
 
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
@@ -25,10 +26,10 @@ type PortManager struct {
 	reversePortMap map[Target]int
 	mut            sync.Mutex
 
-	cb func(*PortInformation)
+	cb func(*PortInformation) error
 }
 
-func NewPortManager(cb func(*PortInformation)) *PortManager {
+func NewPortManager(cb func(*PortInformation) error) *PortManager {
 	return &PortManager{
 		portMap:        map[int]*PortInformation{},
 		reversePortMap: map[Target]int{},
@@ -126,10 +127,39 @@ func (pm *PortManager) startListener(downstream *PortInformation) {
 		klog.InfoS("accept connection", "ep", key, "port", port)
 		if !start {
 			klog.InfoS("start forwarding", "ep", key, "port", port)
-			go pm.cb(downstream)
+			go pm.retryCallback(downstream)
 			start = true
 		}
 	}
+}
+
+// retryCallback keeps invoking the scale-up callback with backoff until it
+// succeeds or the target is removed, so a transient failure cannot strand
+// the connections that were already accepted (the callback is idempotent)
+func (pm *PortManager) retryCallback(downstream *PortInformation) {
+	key := cache.ObjectName{Namespace: downstream.Target.Namespace, Name: downstream.Target.Name}.String()
+	delay := 100 * time.Millisecond
+	for {
+		err := pm.cb(downstream)
+		if err == nil {
+			return
+		}
+		klog.ErrorS(err, "scale up failed, will retry", "ep", key, "port", downstream.Target.Port, "delay", delay)
+		time.Sleep(delay)
+		if delay < 15*time.Second {
+			delay *= 2
+		}
+		if !pm.registered(downstream) {
+			return
+		}
+	}
+}
+
+// registered reports whether the target is still tracked by the manager
+func (pm *PortManager) registered(downstream *PortInformation) bool {
+	pm.mut.Lock()
+	defer pm.mut.Unlock()
+	return pm.portMap[downstream.Listener.Port()] == downstream
 }
 
 // track records the connection while the target is still registered

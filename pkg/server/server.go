@@ -53,8 +53,8 @@ func NewServer(ip string, clientset kubernetes.Interface) *Server {
 }
 
 func (s *Server) Run(ctx context.Context) error {
-	s.manager = NewPortManager(func(pi *PortInformation) {
-		s.scaleUp(ctx, pi)
+	s.manager = NewPortManager(func(pi *PortInformation) error {
+		return s.scaleUp(ctx, pi)
 	})
 	s.queue = workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[string]())
 
@@ -501,22 +501,19 @@ func tunnel(a, b net.Conn) {
 	}()
 }
 
-func (s *Server) scaleUp(ctx context.Context, pi *PortInformation) {
+func (s *Server) scaleUp(ctx context.Context, pi *PortInformation) error {
 	key := cache.ObjectName{Namespace: pi.Target.Namespace, Name: pi.Target.Name}.String()
 	obj, exists, err := s.serviceIndexer.GetByKey(key)
 	if err != nil {
-		klog.ErrorS(err, "get service failed", "svc", key)
-		return
+		return fmt.Errorf("get service %s: %w", key, err)
 	}
 	if !exists {
-		klog.ErrorS(nil, "service not found", "svc", key)
-		return
+		return fmt.Errorf("service %s not found", key)
 	}
 	svc := obj.(*corev1.Service)
 	name := svc.Annotations[scaleDeploymentKey]
 	if name == "" {
-		klog.ErrorS(nil, "annotation not found", "svc", key, "annotation", scaleDeploymentKey)
-		return
+		return fmt.Errorf("service %s has no %s annotation", key, scaleDeploymentKey)
 	}
 
 	// read-modify-write with conflict retry so the activator never fights the
@@ -534,10 +531,10 @@ func (s *Server) scaleUp(ctx context.Context, pi *PortInformation) {
 		return err
 	})
 	if err != nil {
-		klog.ErrorS(err, "scale up failed", "svc", key, "deployment", name)
-		return
+		return fmt.Errorf("scale deployment %s/%s: %w", svc.Namespace, name, err)
 	}
 	klog.InfoS("scale up", "svc", key, "deployment", name)
 	// no need to wait for readiness here: once pods become ready the
 	// EndpointSlice watch hands the pending connections over to the backends
+	return nil
 }
