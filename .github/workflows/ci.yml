@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+
+jobs:
+  manual-scale-to-zero:
+    name: Manual scale to zero
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build image
+        run: docker build -t activator:latest .
+
+      - name: Create cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: kind
+
+      - name: Load image
+        run: kind load docker-image activator:latest
+
+      - name: Deploy activator
+        run: |
+          kubectl apply -k ./manifests
+          kubectl rollout status -n kube-system deploy/activator --timeout=120s
+
+      - name: Deploy webserver
+        run: |
+          docker pull docker.io/library/nginx:latest
+          kind load docker-image docker.io/library/nginx:latest
+          kubectl create deployment webserver --image=docker.io/library/nginx:latest
+          kubectl create service clusterip webserver --tcp=8080:80
+          kubectl rollout status deploy/webserver --timeout=120s
+
+      - name: Test webserver
+        run: |
+          for i in $(seq 1 10); do
+            kubectl exec -n kube-system deploy/activator -- wget -O- -T 10 webserver.default.svc:8080 && exit 0
+            sleep 3
+          done
+          exit 1
+
+      - name: Mark webserver as activator target
+        run: kubectl annotate service webserver scale-from-zero.zsm.io/deployment=webserver
+
+      - name: Scale webserver to 0
+        run: |
+          kubectl scale deployment webserver --replicas=0
+          activator_ip="$(kubectl get pod -n kube-system -l app=activator -o jsonpath='{.items[0].status.podIP}')"
+          for i in $(seq 1 30); do
+            ip="$(kubectl get endpoints webserver -o jsonpath='{.subsets[0].addresses[0].ip}' 2>/dev/null)"
+            if [ -n "$ip" ] && [ "$ip" = "$activator_ip" ]; then
+              # give kube-proxy a moment to program the injected endpoint
+              sleep 5
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "activator endpoint was not injected"
+          kubectl get endpoints webserver -o yaml
+          exit 1
+
+      - name: Test activator wakes webserver
+        run: |
+          kubectl exec -n kube-system deploy/activator -- wget -O- -T 60 webserver.default.svc:8080
+          replicas="$(kubectl get deploy webserver -o jsonpath='{.spec.replicas}')"
+          [ "$replicas" = "1" ] || { echo "expected 1 replica, got $replicas"; exit 1; }
+
+      - name: Dump state on failure
+        if: failure()
+        run: |
+          kubectl get pods -A -o wide || true
+          kubectl get svc,endpoints -A || true
+          kubectl logs -n kube-system deploy/activator --tail=200 || true
