@@ -84,6 +84,9 @@ func (pm *PortManager) RemoveTarget(name string, namespace string, port int) *Po
 	downstream := pm.portMap[port]
 	delete(pm.portMap, port)
 	delete(pm.reversePortMap, target)
+	// closing under the lock stops new connections from being tracked,
+	// so Connections is stable once this returns
+	_ = downstream.Listener.Close()
 	return downstream
 }
 
@@ -96,6 +99,7 @@ func (pm *PortManager) RemoveTargetForAllPorts(name string, namespace string) []
 		if downstream.Target.Name == name && downstream.Target.Namespace == namespace {
 			delete(pm.portMap, port)
 			delete(pm.reversePortMap, downstream.Target)
+			_ = downstream.Listener.Close()
 			downstreams = append(downstreams, downstream)
 		}
 	}
@@ -110,7 +114,12 @@ func (pm *PortManager) startListener(downstream *PortInformation) {
 			return
 		}
 
-		downstream.Connections = append(downstream.Connections, conn)
+		if !pm.track(downstream, conn) {
+			// the target was removed after this conn was accepted, drop it
+			// and let the client retry against the real endpoints
+			_ = conn.Close()
+			continue
+		}
 
 		key := cache.ObjectName{Namespace: downstream.Target.Namespace, Name: downstream.Target.Name}.String()
 		port := downstream.Target.Port
@@ -121,4 +130,15 @@ func (pm *PortManager) startListener(downstream *PortInformation) {
 			start = true
 		}
 	}
+}
+
+// track records the connection while the target is still registered
+func (pm *PortManager) track(downstream *PortInformation, conn net.Conn) bool {
+	pm.mut.Lock()
+	defer pm.mut.Unlock()
+	if pm.portMap[downstream.Listener.Port()] != downstream {
+		return false
+	}
+	downstream.Connections = append(downstream.Connections, conn)
+	return true
 }
