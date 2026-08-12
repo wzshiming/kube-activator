@@ -1,0 +1,38 @@
+# helm values for prometheus-community/prometheus-adapter
+prometheus:
+  url: http://prometheus.default.svc
+  port: 9090
+
+# pinned explicitly so the CI preload into kind matches what the chart deploys
+image:
+  tag: v0.12.0
+
+metricsRelistInterval: 30s
+
+rules:
+  default: false
+  external:
+  # presence: 1 while any request arrived within the last minute, 0 when idle.
+  # Raw counter delta (offset, no extrapolation) minus the exporter's own
+  # stub_status requests: each scrape stores exactly one nginx_up sample and
+  # issues exactly one nginx request, so count_over_time cancels them out
+  # precisely. The HPA metric selector (e.g. app: webserver) picks the workload
+  - seriesQuery: 'nginx_http_requests_total{namespace!=""}'
+    resources:
+      overrides:
+        namespace:
+          resource: namespace
+    name:
+      as: nginx_has_recent_requests
+    metricsQuery: 'sum(clamp_min((<<.Series>>{<<.LabelMatchers>>} - <<.Series>>{<<.LabelMatchers>>} offset 1m) - count_over_time(nginx_up{<<.LabelMatchers>>}[1m]), 0)) > bool 0'
+  # CPU (cores) of the pods behind the selected nginx metrics, joined on
+  # (namespace, pod) and gated by the request presence, so it drives
+  # 1 <-> N while busy but reaches 0 when idle
+  - seriesQuery: 'nginx_http_requests_total{namespace!=""}'
+    resources:
+      overrides:
+        namespace:
+          resource: namespace
+    name:
+      as: nginx_gated_cpu
+    metricsQuery: '(sum(rate(container_cpu_usage_seconds_total{container!=""}[1m]) * on(namespace, pod) group_left() group by(namespace, pod) (nginx_up{<<.LabelMatchers>>}))) * (sum(clamp_min((<<.Series>>{<<.LabelMatchers>>} - <<.Series>>{<<.LabelMatchers>>} offset 1m) - count_over_time(nginx_up{<<.LabelMatchers>>}[1m]), 0)) > bool 0)'
